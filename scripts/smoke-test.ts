@@ -1,0 +1,88 @@
+/**
+ * 冒烟测试：小仓位验证真实上链闭环。
+ *
+ * 用法（先准备测试钱包：约 100U，1INCH/USDT 各半，.env 指向该钱包）：
+ *   npm run smoke -- ship --side inch --amount 50      # 挂 50U 卖 1INCH 仓位
+ *   npm run smoke -- ship --side usdt --amount 50      # 挂 50U 卖 USDT 仓位
+ *   npm run smoke -- dock --strategy-hash 0x...        # 平掉指定仓位
+ *   npm run smoke -- dock-all                          # 平掉本地表全部仓位
+ *
+ * 注意：ship 只广播交易并返回 strategyHash，不写入本地仓位表；dock 从
+ * data/positions.json 反查仓位对应的代币（表外 hash 一律拒绝）。因此
+ * 平掉冒烟仓位前需先在 data/positions.json 手动登记该仓位（字段见
+ * src/types.ts 的 Position），详见 README「冒烟测试」。
+ */
+import 'dotenv/config';
+import { createPublicClient, createWalletClient, http } from 'viem';
+import { privateKeyToAccount } from 'viem/accounts';
+import { createAquaClient } from '../src/aqua-client.js';
+import { loadConfig } from '../src/config.js';
+import { Executor } from '../src/executor.js';
+import { Logger } from '../src/logger.js';
+import { PositionsStore } from '../src/positions.js';
+import { SpotPriceApi } from '../src/price/spot-price-api.js';
+
+function usage(): never {
+  console.error('用法: npm run smoke -- ship --side inch|usdt --amount <U> | dock --strategy-hash 0x.. | dock-all');
+  process.exit(2);
+}
+
+async function main(): Promise<void> {
+  const cfg = loadConfig(process.env);
+  const logger = new Logger('debug');
+  const [cmd, ...rest] = process.argv.slice(2);
+
+  const account = privateKeyToAccount(cfg.privateKey);
+  // chain: undefined 与 src/main.ts 一致（运行时 viem 走 client.chain 兜底，见 executor.ts send() 注释）
+  const publicClient = createPublicClient({ chain: undefined, transport: http(cfg.rpcUrl) });
+  const wallet = createWalletClient({ account, chain: undefined, transport: http(cfg.rpcUrl) });
+  const aqua = await createAquaClient(cfg);
+  const executor = new Executor(aqua, wallet, publicClient, logger, cfg);
+  const price = await new SpotPriceApi({
+    apiKey: cfg.apiKey1inch,
+    tokenInch: cfg.tokenInch,
+    tokenUsdt: cfg.tokenUsdt,
+    chainId: cfg.chainId,
+  }).getPrice();
+  logger.info(`当前价格: ${price.toFixed(6)} USDT/1INCH，钱包: ${account.address}`);
+
+  if (cmd === 'ship') {
+    const side = rest[rest.indexOf('--side') + 1];
+    const amountUsd = Number(rest[rest.indexOf('--amount') + 1]);
+    if ((side !== 'inch' && side !== 'usdt') || !Number.isFinite(amountUsd)) usage();
+
+    // amountUsd 为美元估值：inch 侧除以价格、usdt 侧 1:1，换算成代币原生单位（1INCH 1e18 / USDT 1e6）
+    const decimals = side === 'inch' ? cfg.tokenInchDecimals : cfg.tokenUsdtDecimals;
+    const tokenAmount = BigInt(Math.round(amountUsd / (side === 'inch' ? price : 1) * 10 ** decimals));
+    const w = amountUsd >= 9000 ? 0.0006 : 0.0004; // 与 strategy 同档位规则
+    const lower = side === 'inch' ? price : price * (1 - w);
+    const upper = side === 'inch' ? price * (1 + w) : price;
+    logger.info(`准备 ship：${side} 侧 ${amountUsd}U，区间 [${lower.toFixed(6)}, ${upper.toFixed(6)}]`);
+    const hash = await executor.ship({ side, lower, upper, tokenAmount });
+    logger.info(`✅ ship 完成，strategyHash=${hash}`);
+    logger.info('提示：ship 不写仓位表；如需 dock 该仓位，请先在 data/positions.json 登记（见 README「冒烟测试」）');
+  } else if (cmd === 'dock') {
+    // dock 需要知道仓位对应的代币：从本地仓位表反查，表外 hash 一律拒绝（白名单安全）
+    if (rest.indexOf('--strategy-hash') === -1) usage();
+    const hash = rest[rest.indexOf('--strategy-hash') + 1] as `0x${string}`;
+    if (!hash) usage();
+    const found = new PositionsStore('data/positions.json').load().find((p) => p.strategyHash === hash);
+    if (!found) {
+      logger.error(`本地仓位表找不到 ${hash}，拒绝 dock`);
+      process.exit(1);
+    }
+    const tx = await executor.dock(found.strategyHash, found.tokenAddress);
+    logger.info(`✅ dock 完成，tx=${tx}`);
+  } else if (cmd === 'dock-all') {
+    const positions = new PositionsStore('data/positions.json').load();
+    await executor.dockAll(positions);
+    logger.info('✅ dock-all 完成');
+  } else {
+    usage();
+  }
+}
+
+main().catch((e) => {
+  console.error('冒烟失败:', e);
+  process.exit(1);
+});
