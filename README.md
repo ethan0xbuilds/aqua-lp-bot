@@ -69,6 +69,7 @@ npm start
 
 - 循环间隔默认 60s；Ctrl+C 优雅退出（**不**主动 dock，避免误关仓）
 - 日志：控制台 + `logs/app-YYYY-MM-DD.log` 滚动文件
+- **切换实盘前**：干跑会在 `data/positions.json` 留下 `dry-*` 占位行，请先清空或备份该文件（程序会拒绝带 `dry-*` 行的表启动实盘）
 - 注意：`npm run build` 只用于生成 dist 产物验证；`@1inch/swap-vm-sdk` 打包产物存在无扩展名 import，直接 `node dist/main.js` 必崩，运行请一律用 `npm start`（tsx）
 
 ## 冒烟测试（小仓位真钱闭环）
@@ -88,6 +89,7 @@ npm run smoke -- dock-all                          # 平掉本地表全部仓位
 - 区间宽度档位与主策略一致：≥9000U → 0.06%，否则 0.04%
 - `dock` / `dock-all` 不拉取价格源（应急平仓路径，1inch API 宕机时仍可用）；`dock-all` 广播前会询问「确认平掉本地表全部 N 个仓位？(y/N)」，输入 y 才广播，其他输入直接取消
 - **ship 只广播交易、返回 strategyHash，不写入本地仓位表**；dock 从 `data/positions.json` 反查仓位对应的代币，表外 hash 一律拒绝（白名单安全）
+- **表清理**：`dock` 成功后自动从表删除该行；`dock-all` 只删除确认 dock 成功的行（失败行保留在表，下次继续处理）。熔断全平同理——表只保留未平/未确认的仓位；已被链上 dock 或从未 ship 的死行由主循环对账自动剔除（自愈），无需手工清理
 - 因此平掉冒烟仓位前，需手动在 `data/positions.json` 登记该仓位（字段见 `src/types.ts` 的 `Position`）：
 
 ```json
@@ -146,9 +148,12 @@ npm run smoke -- dock-all                          # 平掉本地表全部仓位
 1. **私钥**：仅存本地 `.env`（gitignored），Public 仓库任何文件不得含私钥/API key
 2. **dock 白名单**：executor 只对本地仓位表（`data/positions.json`）内的 strategyHash 执行 dock；钱包里其他仓位（如网页手动开的）一律不碰
 3. **资金自托管**：Aqua 协议资金全程留在自己钱包，ship/dock 只做链上记账、不转账；最坏情况是仓位挂着不成交，不存在被清算风险
-4. **熔断即全平**：连续失败 → dock 全部自己仓位 → 退出进程（可随时重启恢复）
+4. **熔断即全平**：连续失败 → dock 全部自己仓位 → 退出进程（可随时重启恢复）。熔断只从表删除**确认 dock 成功**的行——未平/未确认的仓位行保留在表，重启后继续处理；已被链上 dock（tokensCount=0xff）或从未 ship（tokensCount=0）的死行由每轮对账自动剔除（自愈），无需手工清理
 5. **干跑先行**：`DRY_RUN=true` 验证决策输出与真实手操一致后，再上真金
 6. **一次一 hash**：Aqua 协议要求同一 strategyHash 只能 ship 一次（dock 后同样永久占用），bot 每次 ship 用随机 salt 保证唯一
+7. **链 ID 校验**：启动时显式校验 RPC 实际链 ID 与 `CHAIN_ID` 一致（Aqua 注册表地址 12 条链完全相同，连错链交易照发不误，必须拦住）
+8. **孤儿仓（已知限制）**：ship 广播成功但回执超时，可能产生「链上有仓、表内无行」的孤儿仓——bot 无法管理它（dock 白名单查不到），属已知限制；v0.2 以链上 Shipped/Docked 事件扫描重建仓位表解决
+9. **Ctrl+C 立即退出（已知限制）**：SIGINT 立即退出进程，不等待当前循环收尾；因每次仓位表变更立即落盘，中途截断的风险窗口为毫秒级
 
 ## 目录结构
 
