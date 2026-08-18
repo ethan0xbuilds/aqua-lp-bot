@@ -2,10 +2,10 @@
  * 冒烟测试：小仓位验证真实上链闭环。
  *
  * 用法（先准备测试钱包：约 100U，1INCH/USDT 各半，.env 指向该钱包）：
- *   npm run smoke -- ship --side inch --amount 50      # 挂 50U 卖 1INCH 仓位
+ *   npm run smoke -- ship --side inch --amount 50      # 挂 50U 卖 1INCH 仓位（强制 0 < amount ≤ 100）
  *   npm run smoke -- ship --side usdt --amount 50      # 挂 50U 卖 USDT 仓位
- *   npm run smoke -- dock --strategy-hash 0x...        # 平掉指定仓位
- *   npm run smoke -- dock-all                          # 平掉本地表全部仓位
+ *   npm run smoke -- dock --strategy-hash 0x...        # 平掉指定仓位（不依赖价格源）
+ *   npm run smoke -- dock-all                          # 平掉本地表全部仓位（广播前人工确认，不依赖价格源）
  *
  * 注意：ship 只广播交易并返回 strategyHash，不写入本地仓位表；dock 从
  * data/positions.json 反查仓位对应的代币（表外 hash 一律拒绝）。因此
@@ -13,6 +13,7 @@
  * src/types.ts 的 Position），详见 README「冒烟测试」。
  */
 import 'dotenv/config';
+import { createInterface } from 'node:readline/promises';
 import { createPublicClient, createWalletClient, http } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { createAquaClient } from '../src/aqua-client.js';
@@ -38,18 +39,29 @@ async function main(): Promise<void> {
   const wallet = createWalletClient({ account, chain: undefined, transport: http(cfg.rpcUrl) });
   const aqua = await createAquaClient(cfg);
   const executor = new Executor(aqua, wallet, publicClient, logger, cfg);
-  const price = await new SpotPriceApi({
-    apiKey: cfg.apiKey1inch,
-    tokenInch: cfg.tokenInch,
-    tokenUsdt: cfg.tokenUsdt,
-    chainId: cfg.chainId,
-  }).getPrice();
-  logger.info(`当前价格: ${price.toFixed(6)} USDT/1INCH，钱包: ${account.address}`);
+  logger.info(`钱包: ${account.address}`);
 
   if (cmd === 'ship') {
+    // 价格只 ship 需要：dock/dock-all 是应急平仓路径，不能被价格源故障阻塞
+    //（主循环熔断全平同样不依赖价格，见 src/loop.ts）
+    const price = await new SpotPriceApi({
+      apiKey: cfg.apiKey1inch,
+      tokenInch: cfg.tokenInch,
+      tokenUsdt: cfg.tokenUsdt,
+      chainId: cfg.chainId,
+    }).getPrice();
+    logger.info(`当前价格: ${price.toFixed(6)} USDT/1INCH`);
     const side = rest[rest.indexOf('--side') + 1];
     const amountUsd = Number(rest[rest.indexOf('--amount') + 1]);
-    if ((side !== 'inch' && side !== 'usdt') || !Number.isFinite(amountUsd)) usage();
+    // 金额守卫（真钱安全）：0 < amount ≤ 100U。0/负数会让下游 BigInt 转换报错令人困惑；
+    // 无上界则 50 误输成 50000 会真实挂大仓位——上限与 README「约 100U 测试钱包」一致
+    const amountOk = Number.isFinite(amountUsd) && amountUsd > 0 && amountUsd <= 100;
+    if ((side !== 'inch' && side !== 'usdt') || !amountOk) {
+      if (!amountOk) {
+        console.error(`--amount 必须是 0 < amount ≤ 100 的美元估值（收到: ${amountUsd}），约 100U 测试钱包`);
+      }
+      usage();
+    }
 
     // amountUsd 为美元估值：inch 侧除以价格、usdt 侧 1:1，换算成代币原生单位（1INCH 1e18 / USDT 1e6）
     const decimals = side === 'inch' ? cfg.tokenInchDecimals : cfg.tokenUsdtDecimals;
@@ -75,6 +87,15 @@ async function main(): Promise<void> {
     logger.info(`✅ dock 完成，tx=${tx}`);
   } else if (cmd === 'dock-all') {
     const positions = new PositionsStore('data/positions.json').load();
+    // 真钱安全：一条命令平掉表内全部仓位，.env 若误指实盘钱包即全平实盘——
+    // 广播前必须人工确认；非 y 输入直接取消（不广播、不改表）
+    const rl = createInterface({ input: process.stdin, output: process.stdout });
+    const answer = (await rl.question(`确认平掉本地表全部 ${positions.length} 个仓位？(y/N) `)).trim().toLowerCase();
+    rl.close();
+    if (answer !== 'y' && answer !== 'yes') {
+      logger.info('已取消 dock-all（未广播任何交易）');
+      process.exit(0);
+    }
     await executor.dockAll(positions);
     logger.info('✅ dock-all 完成');
   } else {

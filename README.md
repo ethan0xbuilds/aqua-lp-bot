@@ -28,7 +28,7 @@
 
 | 规则 | 条件 | 动作 |
 |---|---|---|
-| 陈旧平仓 | 该方向仓位 ≥ 2，且价格离开某仓位区间超过 `STALE_DISTANCE_PCT`（默认 1%，P > 上限×1.01 或 P < 下限×0.99） | dock 该方向**最旧**的仓位 |
+| 陈旧平仓 | 该方向仓位 ≥ 2，且价格离开**最旧仓**区间超过 `STALE_DISTANCE_PCT`（默认 1%，P > 上限×1.01 或 P < 下限×0.99） | dock 该方向**最旧**的仓位 |
 | 空壳清理 | 仓位剩余虚拟余额 < `EMPTY_POSITION_THRESHOLD_USD`（默认 100U，基本成交完） | dock 清理，释放仓位槽 |
 
 ### 熔断与操作上限
@@ -84,15 +84,16 @@ npm run smoke -- dock --strategy-hash 0x...        # 平掉指定仓位
 npm run smoke -- dock-all                          # 平掉本地表全部仓位
 ```
 
-- `--amount` 为美元估值（U）：inch 侧按当前价格换算成 1INCH 数量，usdt 侧 1:1 换算成 USDT 数量（内部使用原生单位：1INCH 1e18 / USDT 1e6）
+- `--amount` 为美元估值（U），脚本强制 `0 < amount ≤ 100`（与「约 100U 测试钱包」一致）：inch 侧按当前价格换算成 1INCH 数量，usdt 侧 1:1 换算成 USDT 数量（内部使用原生单位：1INCH 1e18 / USDT 1e6）
 - 区间宽度档位与主策略一致：≥9000U → 0.06%，否则 0.04%
+- `dock` / `dock-all` 不拉取价格源（应急平仓路径，1inch API 宕机时仍可用）；`dock-all` 广播前会询问「确认平掉本地表全部 N 个仓位？(y/N)」，输入 y 才广播，其他输入直接取消
 - **ship 只广播交易、返回 strategyHash，不写入本地仓位表**；dock 从 `data/positions.json` 反查仓位对应的代币，表外 hash 一律拒绝（白名单安全）
 - 因此平掉冒烟仓位前，需手动在 `data/positions.json` 登记该仓位（字段见 `src/types.ts` 的 `Position`）：
 
 ```json
 [
   {
-    "strategyHash": "0x…（ship 命令打印的 hash）",
+    "strategyHash": "0x0000000000000000000000000000000000000000000000000000000000000000",
     "side": "inch",
     "tokenAddress": "0x111111111117dC0aa78b770fA6A738034120C302",
     "lower": 0.1,
@@ -104,7 +105,7 @@ npm run smoke -- dock-all                          # 平掉本地表全部仓位
 ]
 ```
 
-（`side` 为 `inch` 时 `tokenAddress` 填 1INCH 地址，`usdt` 时填 `0xdAC17F958D2ee523a2206206994597C13D831ec7`；`openedAtMs` 为开仓时间 epoch 毫秒。）
+（替换说明：`strategyHash` 填 ship 命令打印的真实 hash；`lower`/`upper` 填 ship 命令打印的区间；`openedAtMs` 填开仓时间 epoch 毫秒；`side` 为 `inch` 时 `tokenAddress` 填 1INCH 地址，`usdt` 时填 `0xdAC17F958D2ee523a2206206994597C13D831ec7`。示例可直接粘贴，再替换上述占位值。）
 
 ## 参数表（全部 env 键与默认值）
 
