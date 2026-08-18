@@ -1101,6 +1101,46 @@ describe('decide 平仓', () => {
   });
 });
 
+describe('decide 边界语义（严格/非严格不等式回归锚）', () => {
+  it('空壳恰为 100U → 不平（严格小于）', () => {
+    const at = pos({ remainingUsd: 100 });
+    const state = side({ positions: [at] });
+    const d = decide(cfg, P, state, empty, NOW);
+    expect(d.docks).toHaveLength(0);
+  });
+
+  it('间隔恰为 240s 且价格偏离 → 开二仓（≥ 语义）', () => {
+    const state = side({ positions: [pos({ openedAtMs: NOW - 240_000 })] });
+    const drifted = P * 1.0004 * 1.0006; // 严格越过漂移阈值
+    const d = decide(cfg, drifted, state, empty, NOW);
+    expect(d.ships).toHaveLength(1);
+  });
+
+  it('价格恰在上限×(1+0.05%) → 不开二仓（严格大于）', () => {
+    const state = side({ positions: [pos({ openedAtMs: NOW - 300_000 })] });
+    const boundary = P * 1.0004 * 1.0005; // 恰为漂移阈值，不算越过
+    const d = decide(cfg, boundary, state, empty, NOW);
+    expect(d.ships).toHaveLength(0);
+  });
+
+  it('USDT 侧价格恰在下限×(1−0.05%) → 不开二仓（严格小于）', () => {
+    const usdtPos = pos({ side: 'usdt', tokenAddress: cfg.tokenUsdt, lower: P * (1 - 0.0004), upper: P });
+    const state = side({ positions: [usdtPos] });
+    const boundary = P * (1 - 0.0004) * (1 - 0.0005);
+    const d = decide(cfg, boundary, empty, state, NOW);
+    expect(d.ships).toHaveLength(0);
+  });
+
+  it('陈旧恰在 1% 边界 → 不平（严格大于）', () => {
+    const old = pos({ openedAtMs: NOW - 900_000 });
+    const fresh = pos({ openedAtMs: NOW - 300_000 });
+    const state = side({ positions: [old, fresh] });
+    const boundary = P * 1.0004 * 1.01; // 恰为陈旧阈值，不算离开
+    const d = decide(cfg, boundary, state, empty, NOW);
+    expect(d.docks).toHaveLength(0);
+  });
+});
+
 describe('decide 操作上限', () => {
   it('dock 优先，总操作数截断到 maxActionsPerLoop', () => {
     // 两侧各 1 空壳 + 两侧各可开 1 仓 = 4 操作；把上限临时压到 3 验证截断
