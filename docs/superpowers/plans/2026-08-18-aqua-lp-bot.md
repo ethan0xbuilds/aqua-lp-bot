@@ -1415,7 +1415,11 @@ export async function refreshRemaining(
         const usd = Number(remaining) / 10 ** decimals(p.side) * (p.side === 'inch' ? price : 1);
         return { ...p, remainingUsd: usd };
       } catch (e) {
-        return p; // 读失败：保留原值
+        // 读失败：保留原值，但必须留痕（真钱安全）——静默的旧值可能掩盖
+        // 已排空的仓位，导致空壳清理规则失效
+        const reason = e instanceof Error ? e.message : String(e);
+        console.warn(`仓位剩余余额读取失败（保留原值，下轮重试）: hash=${p.strategyHash} 原因=${reason}`);
+        return p;
       }
     }),
   );
