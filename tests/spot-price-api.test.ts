@@ -39,4 +39,44 @@ describe('SpotPriceApi', () => {
     const fetchFn = mockFetch({ inch: {}, usdt: { usd: 1.0 } });
     await expect(makeApi(fetchFn).getPrice()).rejects.toThrow(/usd/);
   });
+
+  it('瞬时失败两次后第三次成功 → 返回价格（3 次尝试 + 短 backoff，不计入熔断）', async () => {
+    let calls = 0;
+    const fetchFn = vi.fn(async (url: string | URL) => {
+      calls += 1;
+      if (calls <= 4) throw new Error('network down'); // 前 2 次尝试（2 币 × 2 次）全败
+      const u = String(url);
+      return {
+        ok: true,
+        json: async () => ({ usd: u.includes(INCH_ADDR.toLowerCase()) ? 0.3 : 1.0 }),
+      } as Response;
+    }) as unknown as typeof fetch;
+    const sleep = vi.fn().mockResolvedValue(undefined);
+    const price = await new SpotPriceApi(
+      { apiKey: 'key', tokenInch: INCH_ADDR, tokenUsdt: USDT_ADDR, chainId: 1 },
+      fetchFn,
+      sleep,
+    ).getPrice();
+    expect(price).toBeCloseTo(0.3, 10);
+    expect(calls).toBe(6); // 3 次尝试 × 2 币
+    expect(sleep).toHaveBeenCalledTimes(2); // 仅失败后 backoff
+    expect(sleep).toHaveBeenNthCalledWith(1, 250); // 250ms × 1
+    expect(sleep).toHaveBeenNthCalledWith(2, 500); // 250ms × 2
+  });
+
+  it('三次全败 → 抛错（1:1 计入熔断的是 3 次尝试后的最终失败）', async () => {
+    const fetchFn = vi.fn(async () => {
+      throw new Error('network down');
+    }) as unknown as typeof fetch;
+    const sleep = vi.fn().mockResolvedValue(undefined);
+    await expect(
+      new SpotPriceApi(
+        { apiKey: 'key', tokenInch: INCH_ADDR, tokenUsdt: USDT_ADDR, chainId: 1 },
+        fetchFn,
+        sleep,
+      ).getPrice(),
+    ).rejects.toThrow(/network down/);
+    expect(fetchFn).toHaveBeenCalledTimes(6); // 重试到底，不提前放弃
+    expect(sleep).toHaveBeenCalledTimes(2);
+  });
 });
