@@ -2317,3 +2317,49 @@ git tag v0.1.0 && git push --tags
 **Placeholder 扫描：** Task 3（spike）为有意设计——探索真实 SDK 签名并落档 SDK_NOTES.md，其余任务均含完整代码；无 TBD/TODO。
 
 **类型一致性：** `Side`、`Position`、`NewPosition`、`SideState`、`Decision`（Task 1 定义）→ Task 4/5/6/7/8/9/10/11 引用一致；`AquaClient.buildShip(pos, walletAddress)`、`buildDock(strategyHash, tokenAddress)`、`getRemaining(strategyHash, tokenAddress)`（Task 3 定义）→ Task 8/9 调用一致；`Executor.ship/dock/dockAll`（Task 9 定义）→ Task 10/11 调用一致；`SpotPriceApi` 构造器 `{apiKey, tokenInch, tokenUsdt, chainId}`（Task 5 定义）→ Task 10/11 调用一致。Task 3 若发现 `getRemaining` 需改为事件方案，需同步改 Task 8 的 aqua 调用——已在 Task 3 Step 3 注明。
+
+---
+
+# 最终全分支 review 修复记录（2026-08-19，opus 终审 + 一轮修复 + re-review PASS）
+
+本节为最终全分支 review 后的修复汇总，与代码同步于 commits `94c9dcd..f960c1c`、`2eb2ea5`。**上文各 Task 节中已被本节覆盖的代码块以 git 历史为准**（本节只列差异，不逐块改写上文）。
+
+## 裁决 NEEDS FIXES 的 findings 与修复
+
+| 编号 | 级别 | 问题 | 修复 |
+|---|---|---|---|
+| C1 | Critical | 熔断/冒烟后表残留死行 → 重启死循环 + 误全平 | ① `dockAll` 返回成功 dock 的 hash 数组（`Promise<string[]>`，best-effort），熔断只删确认成功行后落盘（`src/loop.ts:130-134`）② `getRemaining` 恢复 `tokensCount`（`RemainingInfo { remaining: bigint; tokensCount: number }`），`refreshRemaining` 对 tokensCount ∈ {0, 0xff} 死行 warn 后剔除（`src/events.ts:27-48`）③ 冒烟 dock/dock-all 成功后清表行 |
+| C2 | Critical | DRY_RUN 残留 dry-* 行毒化实盘 → 误触熔断全平真仓 | 实盘启动守卫：`store.load()` 含 dry-* 行且非 DRY_RUN → 明确报错 + exit(1)（`src/main.ts:21-31`）；DRY_RUN 对账跳过 dry 行（`src/loop.ts:106-108`）；README 切换指引 |
+| I1 | Important | spec §6 事件扫描重建未实现 | 本轮不实现（留 v0.2）；README 安全须知第 8 条记孤儿仓已知限制 |
+| I2 | Important | 价格源零重试却 1:1 计入熔断 | `SpotPriceApi.getPrice` 内部 3 次尝试重试（250ms/500ms backoff，sleep 可注入构造器第 3 参）——对齐 spec §6「重试 3 次后计一次循环失败」 |
+| M1 | Minor | dry 行每轮 viem 报错噪声 | 并入 C2 的 dry 行对账跳过 |
+| M2 | Minor | load() 无行级校验 | `positions.ts` 行级校验：strategyHash 0x+64hex 或 `dry-\d+-(inch\|usdt)`、tokenAddress 0x+40hex、side 枚举、5 个数值字段有限；非法行 warn 后剔除。⚠️ 注：tokenAddress 为 42 字符（0x+40hex），不是 66——按 66 校验会清空白名单表 |
+| M3 | Minor | SIGINT 立即退出非「当前循环后」 | 不改代码；README 安全须知第 9 条记已知限制（每次表变更即落盘，风险窗口毫秒级） |
+| M4 | Minor | events 对账失败 console.warn 不进日志 | `refreshRemaining` 增 logger 参数（`refreshRemaining(aqua, positions, price, cfg, logger)`），改 logger.warn；positions.ts 保留 console.warn（store 无 logger 依赖） |
+
+## 三选 FIX-IF-CHEAP 一并纳入
+
+| 编号 | 修复 |
+|---|---|
+| T2① | config num 字段一律 `Number.isFinite`；`LOOP_INTERVAL_S` 必须 **≥ 1 秒**（`src/config.ts:94-97`） |
+| T3① | aqua-client 测试硬编码回归锚（0.2→447213595499 等实测值 + 方向单调锚；SDK_NOTES 旧表 ×1e21 口径已修正为 ×1e12 实测） |
+| T3② | 已并入 C1②（tokensCount 恢复） |
+| T3③ | `src/chain-check.ts` `assertChainId(publicClient, expected)`，main 与 smoke 启动时调用（registry 地址 12 链通用，连错链不可察觉） |
+| T4③ | `save()` 原子写：`.tmp` + `renameSync`，防崩溃截断白名单表 |
+
+## re-review（sonnet）裁决 PASS 后残余（commit 2eb2ea5）
+
+- N1：LOOP_INTERVAL_S ≥1 下限（上文 T2① 已按此表述）
+- N2：SDK_NOTES Q4.3 表格口径修正（×1e21 → ×1e12 实测）
+- N3：smoke dock-all 跳过 dry-* 行并清表
+- N4：非有限数值行被剔除的孤儿化边角——JSON 无法编码 NaN/Infinity + 价格守卫在前，不可达，接受并记录
+
+## 执行层最终签名速查（与 Task 节可能有出入的以本节为准）
+
+- `AquaClient.getRemaining(strategyHash, tokenAddress): Promise<RemainingInfo>`（`{ remaining: bigint; tokensCount: number }`）
+- `Executor.dockAll(positions): Promise<string[]>`（成功 dock 的 strategyHash 数组）
+- `refreshRemaining(aqua, positions, price, cfg, logger): Promise<Position[]>`（死行剔除 + logger.warn）
+- `SpotPriceApi` 构造器第 3 参 `sleepFn?: (ms: number) => Promise<void>`
+- `assertChainId(publicClient, expectedChainId): Promise<void>`
+
+**策略语义零改动**：strategy.ts 及其阈值/宽度/严格不等式/dock 先于 ship/单方向 ≤2 仓，全程未触碰。
