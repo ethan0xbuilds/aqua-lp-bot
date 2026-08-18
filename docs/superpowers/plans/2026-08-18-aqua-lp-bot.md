@@ -37,7 +37,7 @@
 cd /Users/ethan/workspace/aqua-lp-bot
 npm init -y
 npm pkg set name="aqua-lp-bot" version="0.1.0" type="module" main="dist/main.js" private=true engines.node=">=20"
-npm pkg set scripts.dev="tsx watch src/main.ts" scripts.build="tsc -p tsconfig.build.json" scripts.start="node dist/main.js" scripts.test="vitest run" scripts.smoke="tsx scripts/smoke-test.ts" scripts.typecheck="tsc --noEmit"
+npm pkg set scripts.dev="tsx watch src/main.ts" scripts.build="tsc -p tsconfig.build.json" scripts.start="tsx src/main.ts" scripts.test="vitest run" scripts.smoke="tsx scripts/smoke-test.ts" scripts.typecheck="tsc --noEmit"
 npm install viem @1inch/aqua-sdk @1inch/swap-vm-sdk dotenv
 npm install -D typescript tsx vitest @types/node
 ```
