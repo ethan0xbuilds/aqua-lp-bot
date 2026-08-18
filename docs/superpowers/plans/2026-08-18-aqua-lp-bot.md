@@ -1849,8 +1849,24 @@ describe('runLoop', () => {
     expect(dock.mock.calls.map((c) => c[0])).toEqual([older.strategyHash, newer.strategyHash]);
   });
 
-  it.each([Number.NaN, Number.POSITIVE_INFINITY, 0, -0.5])('价格源返回 %s → 本轮失败且不广播任何交易', async (bad) => {
+  it.each([Number.NaN, Number.POSITIVE_INFINITY])('价格源返回非有限值 %s → 本轮失败且不广播任何交易', async (bad) => {
     const deps = makeDeps({}, 1);
+    (deps.priceSource.getPrice as ReturnType<typeof vi.fn>).mockResolvedValue(bad);
+    await expect(runLoop(deps)).rejects.toBeInstanceOf(StopAfterOne);
+    expect((deps.executor.ship as ReturnType<typeof vi.fn>).mock.calls.length).toBe(0);
+    expect((deps.executor.dock as ReturnType<typeof vi.fn>).mock.calls.length).toBe(0);
+    expect((deps.executor.dockAll as ReturnType<typeof vi.fn>).mock.calls.length).toBe(0);
+  });
+
+  it.each([0, -0.5])('价格源返回非正数 %s → 本轮失败且不广播（无守卫时 USDT 侧会 ship 零宽区间）', async (bad) => {
+    const deps = makeDeps({}, 1);
+    // 两侧余额都达标：没有 price<=0 守卫时 USDT 侧会开零宽区间 ship，
+    // 本夹具保证守卫被删时 ship 调用数 > 0，锚定 price<=0 守卫存在
+    const readContract = deps.publicClient.readContract as unknown as ReturnType<typeof vi.fn>;
+    readContract.mockReset();
+    readContract
+      .mockResolvedValueOnce(20000n * 10n ** 18n) // 1INCH
+      .mockResolvedValueOnce(6000n * 10n ** 6n); // 6000 USDT
     (deps.priceSource.getPrice as ReturnType<typeof vi.fn>).mockResolvedValue(bad);
     await expect(runLoop(deps)).rejects.toBeInstanceOf(StopAfterOne);
     expect((deps.executor.ship as ReturnType<typeof vi.fn>).mock.calls.length).toBe(0);
@@ -1895,8 +1911,10 @@ describe('runLoop', () => {
     expect(table.map((p) => p.strategyHash)).toEqual([posB.strategyHash]);
   });
 
-  it('失败 1 次 → 成功 1 次 → 再失败：失败计数清零，不触发 dockAll', async () => {
-    const deps = makeDeps({}, 3);
+  it('失败 1 次 → 成功 1 次 → 连续再失败 2 次：失败计数清零，不触发 dockAll', async () => {
+    const deps = makeDeps({}, 4);
+    // 阈值 3 下：计数正确清零 → 成功后连续失败停在 2，永不熔断；
+    // 计数不清零（broken）→ 第 4 轮累计到 3 会调用 dockAll，本断言因此真正锚定清零行为
     (deps.priceSource.getPrice as ReturnType<typeof vi.fn>)
       .mockRejectedValueOnce(new Error('fail a'))
       .mockResolvedValueOnce(0.3)
