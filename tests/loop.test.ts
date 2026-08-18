@@ -6,6 +6,8 @@ import { PositionsStore } from '../src/positions.js';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import type { AquaClient } from '../src/aqua-client.js';
+import type { Executor } from '../src/executor.js';
 import type { PriceSource } from '../src/price/price-source.js';
 import type { Position } from '../src/types.js';
 
@@ -57,9 +59,12 @@ function makeDeps(over: Partial<LoopDeps> = {}, throwAfterIteration = 1): LoopDe
     executor: {
       ship: vi.fn().mockResolvedValue('0x' + 'ab'.repeat(32)),
       dock: vi.fn().mockResolvedValue('0x' + 'aa'.repeat(32)),
-      dockAll: vi.fn().mockResolvedValue(undefined),
-    } as never,
-    aqua: { getRemaining: vi.fn().mockResolvedValue(20000n * 10n ** 18n) } as never,
+      dockAll: vi.fn().mockResolvedValue([]),
+    } as unknown as Executor,
+    // getRemaining 返回 rawBalances 原始结构（余额 + tokensCount）：tokensCount=1 表示活仓
+    aqua: {
+      getRemaining: vi.fn().mockResolvedValue({ remaining: 20000n * 10n ** 18n, tokensCount: 1 }),
+    } as unknown as AquaClient,
     sleep: vi.fn(async () => {
       if (++iterations >= throwAfterIteration) throw new StopAfterOne();
     }),
@@ -102,6 +107,39 @@ describe('runLoop', () => {
       expect(exitSpy).toHaveBeenCalledWith(1);
     } finally {
       exitSpy.mockRestore(); // 断言失败也恢复，避免污染其他测试
+    }
+  });
+
+  it('熔断 dockAll 后：只删除确认 dock 成功的行，失败行保留在表（重启可继续处理）', async () => {
+    const deps = makeDeps({}, 3);
+    const posA = fakePosition({ strategyHash: ('0x' + '01'.repeat(32)) as `0x${string}` });
+    const posB = fakePosition({ strategyHash: ('0x' + '02'.repeat(32)) as `0x${string}` });
+    deps.store.save([posA, posB]);
+    (deps.priceSource.getPrice as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('api down'));
+    // dockAll 只成功平掉 posA；posB 广播失败 → 其行必须保留（删了会失去对未平仓位的管理）
+    (deps.executor.dockAll as ReturnType<typeof vi.fn>).mockResolvedValue([posA.strategyHash]);
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => undefined as never);
+    try {
+      await expect(runLoop(deps)).rejects.toBeInstanceOf(StopAfterOne);
+      expect(deps.store.load().map((p) => p.strategyHash)).toEqual([posB.strategyHash]);
+    } finally {
+      exitSpy.mockRestore();
+    }
+  });
+
+  it('熔断 dockAll 全部成功 → 表清空（无死行残留，重启不再 dock 它们）', async () => {
+    const deps = makeDeps({}, 3);
+    const posA = fakePosition({ strategyHash: ('0x' + '01'.repeat(32)) as `0x${string}` });
+    const posB = fakePosition({ strategyHash: ('0x' + '02'.repeat(32)) as `0x${string}` });
+    deps.store.save([posA, posB]);
+    (deps.priceSource.getPrice as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('api down'));
+    (deps.executor.dockAll as ReturnType<typeof vi.fn>).mockResolvedValue([posA.strategyHash, posB.strategyHash]);
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => undefined as never);
+    try {
+      await expect(runLoop(deps)).rejects.toBeInstanceOf(StopAfterOne);
+      expect(deps.store.load()).toEqual([]);
+    } finally {
+      exitSpy.mockRestore();
     }
   });
 
@@ -211,5 +249,24 @@ describe('runLoop', () => {
     } finally {
       exitSpy.mockRestore();
     }
+  });
+
+  it('对账跳过 dry-* 占位行（不调 getRemaining），真实行照常对账，表保持完整', async () => {
+    const deps = makeDeps({ cfg: { ...cfg, dryRun: true } });
+    const dryPos = fakePosition({ strategyHash: 'dry-1234567890-inch' as `0x${string}` });
+    const realPos = fakePosition({ strategyHash: ('0x' + 'cd'.repeat(32)) as `0x${string}` });
+    deps.store.save([dryPos, realPos]);
+    // inch 侧已有 2 仓（达上限）且价格在区间内 → 本轮无 dock/ship，只走对账
+    const getRemaining = deps.aqua.getRemaining as ReturnType<typeof vi.fn>;
+    getRemaining.mockResolvedValue({ remaining: 10000n * 10n ** 18n, tokensCount: 1 });
+    await expect(runLoop(deps)).rejects.toBeInstanceOf(StopAfterOne);
+    expect(getRemaining).toHaveBeenCalledTimes(1); // dry 行绝不发链上查询
+    expect(getRemaining).toHaveBeenCalledWith(realPos.strategyHash, realPos.tokenAddress);
+    const table = deps.store.load();
+    expect(table.map((p) => p.strategyHash).sort()).toEqual([dryPos.strategyHash, realPos.strategyHash].sort());
+    const real = table.find((p) => p.strategyHash === realPos.strategyHash)!;
+    expect(real.remainingUsd).toBeCloseTo(3000, 6); // 真实行对账结果落地
+    const dry = table.find((p) => p.strategyHash === dryPos.strategyHash)!;
+    expect(dry.remainingUsd).toBe(dryPos.remainingUsd); // dry 行原样保留
   });
 });

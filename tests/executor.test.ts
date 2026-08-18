@@ -108,7 +108,7 @@ describe('Executor', () => {
     vi.useRealTimers();
   });
 
-  it('dockAll 逐个平仓，单个失败不影响其余（best-effort）', async () => {
+  it('dockAll 逐个平仓，单个失败不影响其余（best-effort），只返回成功 dock 的 hash', async () => {
     vi.useFakeTimers(); // 消除重试真实 sleep 的抖动风险
     const { exec, buildDock, sendTransaction } = makeMocks();
     let calls = 0;
@@ -120,9 +120,16 @@ describe('Executor', () => {
     const positions = [makePos(), makePos({ strategyHash: '0x' + 'cd'.repeat(32) as `0x${string}` })];
     const p = exec.dockAll(positions); // 不抛错
     await vi.runAllTimersAsync();
-    await p;
+    const docked = await p;
+    expect(docked).toEqual([positions[0].strategyHash]); // 失败项绝不返回（否则熔断会误删未平仓位行）
     expect(buildDock).toHaveBeenCalledTimes(2);
     expect(sendTransaction).toHaveBeenCalledTimes(4); // 1 成功 + 3 次失败重试
     vi.useRealTimers();
+  });
+
+  it('dockAll 空表 → 返回空数组且不广播', async () => {
+    const { exec, buildDock } = makeMocks();
+    await expect(exec.dockAll([])).resolves.toEqual([]);
+    expect(buildDock).not.toHaveBeenCalled();
   });
 });

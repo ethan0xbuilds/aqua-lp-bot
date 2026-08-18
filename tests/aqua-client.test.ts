@@ -176,15 +176,15 @@ describe('buildDock', () => {
 });
 
 describe('getRemaining', () => {
-  it('调用 rawBalances(maker, router, strategyHash, token) 并返回 balance', async () => {
+  it('调用 rawBalances(maker, router, strategyHash, token) 并返回 { remaining, tokensCount }', async () => {
     readContractMock.mockReset();
-    readContractMock.mockResolvedValue([1234n, 1n]);
+    readContractMock.mockResolvedValue([1234n, 1]);
 
     const client = await createAquaClient(cfg);
     const hash = ('0x' + 'cd'.repeat(32)) as `0x${string}`;
-    const remaining = await client.getRemaining(hash, cfg.tokenInch);
+    const info = await client.getRemaining(hash, cfg.tokenInch);
 
-    expect(remaining).toBe(1234n);
+    expect(info).toEqual({ remaining: 1234n, tokensCount: 1 }); // tokensCount 原样透传（死行判定用）
     expect(readContractMock).toHaveBeenCalledTimes(1);
 
     const callArgs = readContractMock.mock.calls[0][0] as {
@@ -199,5 +199,26 @@ describe('getRemaining', () => {
     expect((callArgs.args[1] as string).toLowerCase()).toBe(ROUTER.toLowerCase());
     expect(callArgs.args[2]).toBe(hash);
     expect((callArgs.args[3] as string).toLowerCase()).toBe(cfg.tokenInch.toLowerCase());
+  });
+});
+
+describe('区间方向编码回归锚（硬编码，防实现与测试同源漂移）', () => {
+  it('0.2/0.25/0.3 → 固定 sqrt 定点编码值（实测值，勿随手改）', () => {
+    // 2026-08-18 用已安装 SDK（@1inch/swap-vm-sdk@0.4.0 + @1inch/aqua-sdk@0.3.0）
+    // 实测输出，PAIR 与 src/aqua-client.ts 的 pricePair 完全一致。
+    // 注意与 docs/SDK_NOTES.md Q4.3 表格相差 1e9（SDK_NOTES 记录的是另一层缩放口径），
+    // 以本测试的实际 SDK 输出为准。
+    expect(instructions.concentrate.Price.fromHuman('0.2', PAIR).toSqrt()).toBe(447213595499n);
+    expect(instructions.concentrate.Price.fromHuman('0.25', PAIR).toSqrt()).toBe(500000000000n);
+    expect(instructions.concentrate.Price.fromHuman('0.3', PAIR).toSqrt()).toBe(547722557505n);
+  });
+
+  it('方向编码保持升序：upper > lower（inch 侧区间挂在当前价上方的前提）', () => {
+    const lo = instructions.concentrate.Price.fromHuman('0.2', PAIR).toSqrt();
+    const hi = instructions.concentrate.Price.fromHuman('0.20008', PAIR).toSqrt(); // +0.04% 宽度
+    expect(hi).toBeGreaterThan(lo);
+    // 0.2 → 0.20008 的编码增量与 0.2 的编码值一并锚定
+    expect(lo).toBe(447213595499n);
+    expect(hi).toBe(447303029276n);
   });
 });

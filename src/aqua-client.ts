@@ -38,6 +38,19 @@ export interface ShipPlan {
 }
 
 /**
+ * 仓位剩余虚拟余额查询结果（Aqua 合约 rawBalances 的原始返回）。
+ * tokensCount 语义（SDK_NOTES Q6）：= 策略登记 token 数；0 = 从未 ship（幽灵行）；
+ * 0xff = 已 dock/不存在（合约 dock 后置 0xff）。0 与 0xff 都是「死行」——
+ * 留在表内会让熔断 dockAll 反复 revert，必须由对账剔除。
+ */
+export interface RemainingInfo {
+  /** 剩余虚拟余额（原生单位） */
+  remaining: bigint;
+  /** 策略登记 token 数（SDK 原始返回，未加工） */
+  tokensCount: number;
+}
+
+/**
  * Aqua SDK 的薄封装：全项目只有这一个文件 import @1inch/* 包。
  * 换 SDK 版本/接口时只需改这里。
  */
@@ -46,8 +59,8 @@ export interface AquaClient {
   buildShip(pos: NewPosition, walletAddress: `0x${string}`): Promise<ShipPlan>;
   /** 构建 dock 交易 */
   buildDock(strategyHash: `0x${string}`, tokenAddress: `0x${string}`): Promise<TxRequest>;
-  /** 读取仓位剩余虚拟余额（原生单位），用于空壳判定与对账 */
-  getRemaining(strategyHash: `0x${string}`, tokenAddress: `0x${string}`): Promise<bigint>;
+  /** 读取仓位剩余虚拟余额（原生单位）与策略登记 token 数，用于空壳判定、对账与死行剔除 */
+  getRemaining(strategyHash: `0x${string}`, tokenAddress: `0x${string}`): Promise<RemainingInfo>;
 }
 
 export async function createAquaClient(cfg: Config): Promise<AquaClient> {
@@ -131,16 +144,17 @@ export async function createAquaClient(cfg: Config): Promise<AquaClient> {
       return { to: tx.to, data: tx.data, value: tx.value };
     },
 
-    async getRemaining(strategyHash, tokenAddress): Promise<bigint> {
+    async getRemaining(strategyHash, tokenAddress): Promise<RemainingInfo> {
       // rawBalances(maker, app, strategyHash, token) view returns (uint248 balance, uint8 tokensCount)
-      // balance 即该仓位的剩余虚拟余额（ship 登记、push/pull 增减），见 SDK_NOTES Q6
-      const [balance] = (await publicClient.readContract({
+      // balance 即该仓位的剩余虚拟余额（ship 登记、push/pull 增减），见 SDK_NOTES Q6；
+      // tokensCount 用于死行判定（0 = 从未 ship、0xff = 已 dock），不能丢弃
+      const [balance, tokensCount] = (await publicClient.readContract({
         address: registry.toString(),
         abi: ABI.AQUA_ABI,
         functionName: 'rawBalances',
         args: [walletAddress, router.toString(), strategyHash, tokenAddress],
       })) as [bigint, number];
-      return balance;
+      return { remaining: balance, tokensCount };
     },
   };
 }

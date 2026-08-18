@@ -100,8 +100,12 @@ async function oneIteration(deps: LoopDeps, nowMs: number): Promise<void> {
     }
   }
 
-  // 对账：刷新各仓位剩余余额（只读链上调用，干跑同样执行）
-  positions = await refreshRemaining(aqua, positions, price, cfg);
+  // 对账：刷新各仓位剩余余额（只读链上调用，干跑同样执行）。
+  // dry-* 占位行（DRY_RUN 假行）无链上真相：跳过对账（避免每轮 viem 报错噪声），
+  // 但保留在表内（干跑模拟仓位上限/二仓间隔需要它们）；真实行照常对账。
+  const dryRows = positions.filter((p) => p.strategyHash.startsWith('dry-'));
+  const realRows = positions.filter((p) => !p.strategyHash.startsWith('dry-'));
+  positions = [...dryRows, ...(await refreshRemaining(aqua, realRows, price, cfg, logger))];
   store.save(positions);
 }
 
@@ -123,7 +127,10 @@ export async function runLoop(deps: LoopDeps): Promise<void> {
         if (cfg.dryRun) {
           for (const p of store.load()) logger.info(`[DRY_RUN] 熔断将 dock ${p.strategyHash}`);
         } else {
-          await executor.dockAll(store.load());
+          const docked = await executor.dockAll(store.load());
+          // 只删除确认 dock 成功的行；失败行保留在表（重启后继续处理/由对账死行自愈剔除）。
+          // 若不清表，熔断成功的行会残留成死行——重启后每次熔断都反复 dock 它们（死循环）。
+          store.save(store.load().filter((p) => !docked.includes(p.strategyHash)));
         }
         process.exit(1);
       }

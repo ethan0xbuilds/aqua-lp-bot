@@ -80,15 +80,22 @@ export class Executor {
     return hash;
   }
 
-  /** 熔断全平：best-effort 逐个 dock，单个失败记录后继续 */
-  async dockAll(positions: Position[]): Promise<void> {
+  /**
+   * 熔断全平：best-effort 逐个 dock，单个失败记录后继续；整体不抛错。
+   * 返回成功 dock 的 strategyHash 数组：调用方据此把「确认已平」的行从表删除，
+   * 失败行保留——删多了会失去对未平仓位的管理（真钱安全），删少了由对账死行自愈兜底。
+   */
+  async dockAll(positions: Position[]): Promise<string[]> {
     this.logger.warn(`熔断全平：共 ${positions.length} 个仓位`);
+    const docked: string[] = [];
     for (const p of positions) {
       try {
         await this.dock(p.strategyHash, p.tokenAddress);
+        docked.push(p.strategyHash);
       } catch (e) {
         this.logger.error(`dockAll 失败（继续下一个）: ${p.strategyHash} — ${String(e)}`);
       }
     }
+    return docked;
   }
 }
