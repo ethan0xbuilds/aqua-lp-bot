@@ -29,8 +29,8 @@
 | 二仓触发 | 该方向仓位数 = 1，且距该方向最新仓位开仓 ≥ `POSITION_MIN_INTERVAL_S`（默认 240s，即 3–5 分钟），且价格沿成交方向偏离最新仓位区间 ≥ `PRICE_DRIFT_PCT`（默认 0.05%） |
 | 仓位上限 | 单方向 ≤ 2 仓；每循环每方向最多开 1 仓 |
 | 区间宽度 w | 按该侧资金定档：≥9000U → 0.06%（0.0006）；6000–9000U → 0.04%（0.0004） |
-| 区间位置（重 1INCH） | 单边卖 1INCH：`[P, P × (1+w)]`（挂在当前价上方） |
-| 区间位置（重 USDT） | 单边卖 USDT：`[P × (1−w), P]`（挂在当前价下方） |
+| 区间位置（重 1INCH） | 单边卖 1INCH：`[P, P × (1+w)]`（挂在当前价上方，价格上涨才卖出） |
+| 区间位置（重 USDT） | 单边卖 USDT：`[P × (1−w), P]`（挂在当前价下方，价格下跌才买入 1INCH） |
 | 资金（共享） | ship 仅链上记账、不动币；新仓位以该侧当前真实余额做虚拟分配，同一余额可同时支撑多仓（Aqua Shared Liquidity，成交时按真实余额原子结算封顶） |
 
 其中：
@@ -44,7 +44,7 @@
 | 规则 | 条件 | 动作 |
 |---|---|---|
 | 陈旧平仓 | 价格偏离某仓位区间超过 `STALE_DISTANCE_PCT`（默认 1%，即 P > 上限×1.01 或 P < 下限×0.99），且该方向仓位数量 ≥ 2 | dock 该方向**最旧**的仓位 |
-| 空壳清理 | 仓位剩余虚拟余额为 0（已完全成交） | dock 清理，释放仓位槽 |
+| 空壳清理 | 仓位剩余虚拟余额 < `EMPTY_POSITION_THRESHOLD_USD`（默认 100U，基本成交完） | dock 清理，释放仓位槽 |
 
 ### 2.3 熔断规则
 
@@ -72,6 +72,8 @@ src/
 ├── executor.ts    # ship()/dock() 执行：nonce 管理、gas 估算、重试、失败计数、熔断与紧急全平
 ├── events.ts      # 链上事件解码（Shipped/Docked/Pushed/Pulled），仓位表对账
 └── logger.ts      # 结构化日志：控制台 + logs/ 滚动文件（无 TG 通知）
+scripts/
+└── smoke-test.ts  # 一次性冒烟测试：显式参数 ship 小仓位 → 确认事件 → dock（不依赖策略阈值）
 tests/             # vitest 单测，重点是 strategy.ts 决策纯函数
 ```
 
@@ -103,12 +105,13 @@ tests/             # vitest 单测，重点是 strategy.ts 决策纯函数
 | `WIDTH_TIERS_USD` | {9000: 0.0006, 6000: 0.0004} | 区间宽度档位 |
 | `MAX_POSITIONS_PER_SIDE` | 2 | 单方向仓位上限 |
 | `STALE_DISTANCE_PCT` | 0.01 | 陈旧判定：价格离开区间的距离比例 |
+| `EMPTY_POSITION_THRESHOLD_USD` | 100 | 空壳判定：仓位剩余虚拟余额低于该值则 dock |
 | `LOOP_INTERVAL_S` | 60 | 循环间隔（用户手动时约 2-3 分钟看一次） |
 | `POSITION_MIN_INTERVAL_S` | 240 | 同方向两仓最小开仓间隔（3–5 分钟取中） |
 | `PRICE_DRIFT_PCT` | 0.0005 | 二仓触发：价格沿成交方向偏离最新仓位区间的比例 |
 | `MAX_CONSECUTIVE_FAILURES` | 3 | 熔断阈值 |
 | `MAX_ACTIONS_PER_LOOP` | 4 | 单循环操作上限 |
-| `DRY_RUN` | false | 干跑：只计算决策并打日志，不广播交易 |
+| `DRY_RUN` | false | 干跑：只计算决策并打日志，不广播交易；本地仓位表按「假设执行成功」推进 |
 
 ## 5. 安全设计
 
@@ -144,7 +147,7 @@ tests/             # vitest 单测，重点是 strategy.ts 决策纯函数
 4. executor：真实链上跑通一次 ship → 读事件 → dock 闭环（需 PRIVATE_KEY + RPC）
 5. events 对账 + 仓位表持久化（JSON 文件，重启不丢表）
 6. 主循环 + 熔断 + 优雅退出
-7. DRY_RUN 验证 → 用户上真钱
+7. DRY_RUN 验证（决策与手操比对）→ 8. 小仓位真钱闭环：独立冒烟脚本（`scripts/smoke-test.ts`）以显式参数（如 50U）跑通 ship→确认事件→dock，不依赖策略阈值；如需连策略一起测，可将阈值参数缩水后在测试钱包跑几轮 → 9. 上全部本金
 
 ## 9. 已知简化（用户后期可优化）
 
