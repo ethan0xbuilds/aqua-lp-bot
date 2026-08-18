@@ -96,10 +96,13 @@ describe('runLoop', () => {
     const deps = makeDeps({}, 3); // 允许跑 3 次失败迭代
     (deps.priceSource.getPrice as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('api down'));
     const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => undefined as never);
-    await expect(runLoop(deps)).rejects.toBeInstanceOf(StopAfterOne);
-    expect((deps.executor.dockAll as ReturnType<typeof vi.fn>).mock.calls.length).toBe(1);
-    expect(exitSpy).toHaveBeenCalledWith(1);
-    exitSpy.mockRestore();
+    try {
+      await expect(runLoop(deps)).rejects.toBeInstanceOf(StopAfterOne);
+      expect((deps.executor.dockAll as ReturnType<typeof vi.fn>).mock.calls.length).toBe(1);
+      expect(exitSpy).toHaveBeenCalledWith(1);
+    } finally {
+      exitSpy.mockRestore(); // 断言失败也恢复，避免污染其他测试
+    }
   });
 
   it('乱序仓位表：喂给 decide 的两侧按 openedAtMs 升序（dock 先最旧）', async () => {
@@ -120,12 +123,75 @@ describe('runLoop', () => {
     expect(dock.mock.calls.map((c) => c[0])).toEqual([older.strategyHash, newer.strategyHash]);
   });
 
-  it.each([Number.NaN, Number.POSITIVE_INFINITY])('价格源返回 %s → 本轮失败且不广播任何交易', async (bad) => {
+  it.each([Number.NaN, Number.POSITIVE_INFINITY, 0, -0.5])('价格源返回 %s → 本轮失败且不广播任何交易', async (bad) => {
     const deps = makeDeps({}, 1);
     (deps.priceSource.getPrice as ReturnType<typeof vi.fn>).mockResolvedValue(bad);
     await expect(runLoop(deps)).rejects.toBeInstanceOf(StopAfterOne);
     expect((deps.executor.ship as ReturnType<typeof vi.fn>).mock.calls.length).toBe(0);
     expect((deps.executor.dock as ReturnType<typeof vi.fn>).mock.calls.length).toBe(0);
     expect((deps.executor.dockAll as ReturnType<typeof vi.fn>).mock.calls.length).toBe(0);
+  });
+
+  it('真实模式：ship #1 成功、ship #2 广播抛错 → 磁盘表保留 #1', async () => {
+    const deps = makeDeps();
+    const hashA = ('0x' + 'ab'.repeat(32)) as `0x${string}`;
+    // 两侧资金都达标 → 本轮 2 个 ship（1INCH + USDT）
+    const readContract = deps.publicClient.readContract as unknown as ReturnType<typeof vi.fn>;
+    readContract.mockReset();
+    readContract
+      .mockResolvedValueOnce(20000n * 10n ** 18n) // 1INCH ≈ 6000U @0.3
+      .mockResolvedValueOnce(6000n * 10n ** 6n); // 6000 USDT ≈ 6000U
+    const ship = deps.executor.ship as ReturnType<typeof vi.fn>;
+    ship.mockResolvedValueOnce(hashA).mockRejectedValueOnce(new Error('ship #2 broadcast fail'));
+    await expect(runLoop(deps)).rejects.toBeInstanceOf(StopAfterOne);
+    const table = deps.store.load();
+    expect(table).toHaveLength(1);
+    expect(table[0].strategyHash).toBe(hashA);
+  });
+
+  it('真实模式：dock #1 成功、dock #2 抛错 → 磁盘表已无 #1、仍有 #2', async () => {
+    const deps = makeDeps();
+    const posA = fakePosition({
+      strategyHash: ('0x' + '01'.repeat(32)) as `0x${string}`,
+      remainingUsd: 50, // 空壳 → 本轮 dock
+      openedAtMs: 1_000,
+    });
+    const posB = fakePosition({
+      strategyHash: ('0x' + '02'.repeat(32)) as `0x${string}`,
+      remainingUsd: 50,
+      openedAtMs: 2_000,
+    });
+    deps.store.save([posA, posB]);
+    const dock = deps.executor.dock as ReturnType<typeof vi.fn>;
+    dock.mockResolvedValueOnce('0x' + 'aa'.repeat(32)).mockRejectedValueOnce(new Error('dock #2 broadcast fail'));
+    await expect(runLoop(deps)).rejects.toBeInstanceOf(StopAfterOne);
+    const table = deps.store.load();
+    expect(table.map((p) => p.strategyHash)).toEqual([posB.strategyHash]);
+  });
+
+  it('失败 1 次 → 成功 1 次 → 再失败：失败计数清零，不触发 dockAll', async () => {
+    const deps = makeDeps({}, 3);
+    (deps.priceSource.getPrice as ReturnType<typeof vi.fn>)
+      .mockRejectedValueOnce(new Error('fail a'))
+      .mockResolvedValueOnce(0.3)
+      .mockRejectedValue(new Error('fail b'));
+    await expect(runLoop(deps)).rejects.toBeInstanceOf(StopAfterOne);
+    expect((deps.executor.dockAll as ReturnType<typeof vi.fn>).mock.calls.length).toBe(0);
+    expect((deps.executor.ship as ReturnType<typeof vi.fn>).mock.calls.length).toBe(1); // 第 2 轮成功过
+  });
+
+  it('DRY_RUN 熔断：只 log 不广播 dockAll，exit(1)', async () => {
+    const deps = makeDeps({ cfg: { ...cfg, dryRun: true } }, 3);
+    (deps.priceSource.getPrice as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('api down'));
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => undefined as never);
+    try {
+      await expect(runLoop(deps)).rejects.toBeInstanceOf(StopAfterOne);
+      expect((deps.executor.dockAll as ReturnType<typeof vi.fn>).mock.calls.length).toBe(0);
+      expect((deps.executor.dock as ReturnType<typeof vi.fn>).mock.calls.length).toBe(0);
+      expect((deps.executor.ship as ReturnType<typeof vi.fn>).mock.calls.length).toBe(0);
+      expect(exitSpy).toHaveBeenCalledWith(1);
+    } finally {
+      exitSpy.mockRestore();
+    }
   });
 });

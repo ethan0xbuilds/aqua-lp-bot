@@ -40,10 +40,10 @@ async function oneIteration(deps: LoopDeps, nowMs: number): Promise<void> {
   const { cfg, logger, priceSource, publicClient, store, executor, aqua, walletAddress } = deps;
 
   const price = await priceSource.getPrice();
-  // 价格必须是有限数值：NaN/Infinity 会生成垃圾区间（NaN 比较恒 false），
-  // 显式拒绝并计入循环失败，由熔断兜底（真钱安全）
-  if (!Number.isFinite(price)) {
-    throw new Error(`价格源返回非有限价格: ${price}`);
+  // 价格必须是正有限数值：NaN/Infinity 会生成垃圾区间（NaN 比较恒 false），
+  // 0/负价格会误平健康仓位或开出零宽区间——显式拒绝并计入循环失败，由熔断兜底（真钱安全）
+  if (!Number.isFinite(price) || price <= 0) {
+    throw new Error(`价格源返回非有限或非正价格: ${price}`);
   }
   const balances = await fetchBalances(publicClient, walletAddress, cfg);
   let positions = store.load();
@@ -60,6 +60,7 @@ async function oneIteration(deps: LoopDeps, nowMs: number): Promise<void> {
     for (const p of decision.docks) {
       logger.info(`[DRY_RUN] 将 dock ${p.strategyHash}`);
       positions = positions.filter((x) => x.strategyHash !== p.strategyHash);
+      store.save(positions); // 每次表变更立即落盘（真钱安全，下同）
     }
     for (const s of decision.ships) {
       const fakeHash = `dry-${nowMs}-${s.side}` as `0x${string}`;
@@ -74,12 +75,14 @@ async function oneIteration(deps: LoopDeps, nowMs: number): Promise<void> {
         remainingUsd: estUsd(s, price, cfg),
         openedAtMs: nowMs,
       });
+      store.save(positions);
     }
   } else {
     // 真实模式：先 dock 后 ship
     for (const p of decision.docks) {
       await executor.dock(p.strategyHash, p.tokenAddress);
       positions = positions.filter((x) => x.strategyHash !== p.strategyHash);
+      store.save(positions);
     }
     for (const s of decision.ships) {
       const strategyHash = await executor.ship(s);
@@ -93,6 +96,7 @@ async function oneIteration(deps: LoopDeps, nowMs: number): Promise<void> {
         remainingUsd: estUsd(s, price, cfg),
         openedAtMs: nowMs,
       });
+      store.save(positions);
     }
   }
 
