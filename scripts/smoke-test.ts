@@ -96,19 +96,25 @@ async function main(): Promise<void> {
   } else if (cmd === 'dock-all') {
     const store = new PositionsStore('data/positions.json');
     const positions = store.load();
+    // dry-* 占位行（DRY_RUN 残留）没有链上真相，buildDock 对非 hex 必抛错：跳过广播并顺手清表
+    const dry = positions.filter((p) => p.strategyHash.startsWith('dry-'));
+    const real = positions.filter((p) => !p.strategyHash.startsWith('dry-'));
+    if (dry.length > 0) logger.info(`跳过 ${dry.length} 个 dry-* 占位行（无法上链，将一并清除）`);
     // 真钱安全：一条命令平掉表内全部仓位，.env 若误指实盘钱包即全平实盘——
     // 广播前必须人工确认；非 y 输入直接取消（不广播、不改表）
     const rl = createInterface({ input: process.stdin, output: process.stdout });
-    const answer = (await rl.question(`确认平掉本地表全部 ${positions.length} 个仓位？(y/N) `)).trim().toLowerCase();
+    const answer = (await rl.question(`确认平掉本地表全部 ${real.length} 个仓位？(y/N) `)).trim().toLowerCase();
     rl.close();
     if (answer !== 'y' && answer !== 'yes') {
       logger.info('已取消 dock-all（未广播任何交易）');
       process.exit(0);
     }
-    const docked = await executor.dockAll(positions);
-    logger.info(`✅ dock-all 完成（成功 ${docked.length}/${positions.length}）`);
-    // 只删确认 dock 成功的行：失败行保留在表，便于下次继续处理（不误删未平仓位）
-    store.save(store.load().filter((p) => !docked.includes(p.strategyHash)));
+    const docked = await executor.dockAll(real);
+    logger.info(`✅ dock-all 完成（成功 ${docked.length}/${real.length}）`);
+    // 只删确认 dock 成功的行 + dry 占位行；失败行保留在表，便于下次继续处理（不误删未平仓位）
+    store.save(
+      store.load().filter((p) => !docked.includes(p.strategyHash) && !p.strategyHash.startsWith('dry-')),
+    );
   } else {
     usage();
   }

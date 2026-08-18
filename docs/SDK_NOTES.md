@@ -211,11 +211,16 @@ export type PricePair = { quoteToken: PriceToken; baseToken: PriceToken; };
 - 合约 `P = tokenGt/tokenLt` = USDT/1INCH = **恰好就是项目的 P**，方向一致，无需翻转。
 - `Price.fromHuman(String(p), { quoteToken: {address: USDT, decimals: 6n}, baseToken: {address: 1INCH, decimals: 18n} }).toSqrt()` 实测（USDT 报价、1INCH 为 base）：
 
-  | 人类价格（USDT/1INCH） | toSqrt()（1e18 定点） |
+  | 人类价格（USDT/1INCH） | toSqrt() 实测输出（已安装 SDK） |
   |---|---|
-  | 0.2 | 447213595499957939281 |
-  | 0.25 | 500000000000000000000 |
-  | 0.3 | 547722557505166113457 |
+  | 0.2 | 447213595499 |
+  | 0.20008 | 447303029276 |
+  | 0.25 | 500000000000 |
+  | 0.3 | 547722557505 |
+
+  口径：实际编码 = `sqrt(价格 × 10^(base+quote decimals))`（本对 0.2 × 10^24 = 2e23 → sqrt ≈ 4.47e11，即 ×1e12 量级）。
+  ⚠️ 本表早先版本误记成 ×1e21 量级（如 0.2 → 447213595499957939281），系记录口径错误；
+  以本表与 `tests/aqua-client.test.ts` 的硬编码回归锚（生产同构 PAIR 实测）为准。
 
   升序保持（0.2→0.3 的 sqrt 也升序），因为 quote（USDT）恰为 tokenGt。
 - 注意：若 quote < base 的对（如 USDC/WETH 用 USDC 报价），`PriceRange.new` 会自动 swap min/max 保证 `sqrtPriceMin < sqrtPriceMax`（SDK 行为）；本项目对不受影响，但别假设 SDK 不排序。

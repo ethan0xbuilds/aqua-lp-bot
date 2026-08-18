@@ -89,11 +89,11 @@ export function loadConfig(env: NodeJS.ProcessEnv): Config {
   const rpcUrl = required(env, 'RPC_URL');
   const apiKey1inch = required(env, 'API_KEY_1INCH');
 
-  // LOOP_INTERVAL_S 必须 > 0：0/负数/空白串（Number('  ')=0）会让主循环退化成
-  // 1ms 忙循环打爆 RPC/API，一律拒绝启动
+  // LOOP_INTERVAL_S 必须 ≥ 1：<1（含 0/负数/空白串 Number('  ')=0）会让主循环退化成
+  // 1ms 级忙循环打爆 RPC/API，一律拒绝启动
   const loopIntervalS = num(env, 'LOOP_INTERVAL_S', DEFAULTS.loopIntervalS);
-  if (loopIntervalS <= 0) {
-    throw new Error(`环境变量 LOOP_INTERVAL_S 必须为正数: ${loopIntervalS}`);
+  if (loopIntervalS < 1) {
+    throw new Error(`环境变量 LOOP_INTERVAL_S 必须 ≥ 1 秒: ${loopIntervalS}`);
   }
 
   return {

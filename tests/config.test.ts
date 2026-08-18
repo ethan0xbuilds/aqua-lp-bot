@@ -50,12 +50,14 @@ describe('loadConfig', () => {
     expect(() => loadConfig({ ...BASE_ENV, STALE_DISTANCE_PCT: '-Infinity' })).toThrow(/STALE_DISTANCE_PCT/);
   });
 
-  it('LOOP_INTERVAL_S 必须 > 0：0/负数/空白串/Infinity 一律拒绝启动', () => {
+  it('LOOP_INTERVAL_S 必须 ≥ 1：<1/0/负数/空白串/Infinity 一律拒绝启动', () => {
+    expect(() => loadConfig({ ...BASE_ENV, LOOP_INTERVAL_S: '0.5' })).toThrow(/LOOP_INTERVAL_S/);
     expect(() => loadConfig({ ...BASE_ENV, LOOP_INTERVAL_S: '0' })).toThrow(/LOOP_INTERVAL_S/);
     expect(() => loadConfig({ ...BASE_ENV, LOOP_INTERVAL_S: '-5' })).toThrow(/LOOP_INTERVAL_S/);
     expect(() => loadConfig({ ...BASE_ENV, LOOP_INTERVAL_S: '   ' })).toThrow(/LOOP_INTERVAL_S/); // Number('  ')=0
     expect(() => loadConfig({ ...BASE_ENV, LOOP_INTERVAL_S: 'Infinity' })).toThrow(/LOOP_INTERVAL_S/);
     // 合法值照常通过
+    expect(loadConfig({ ...BASE_ENV, LOOP_INTERVAL_S: '1' }).loopIntervalS).toBe(1);
     expect(loadConfig({ ...BASE_ENV, LOOP_INTERVAL_S: '30' }).loopIntervalS).toBe(30);
   });
 
