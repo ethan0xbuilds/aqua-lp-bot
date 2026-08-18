@@ -62,7 +62,9 @@ function num(env: NodeJS.ProcessEnv, key: string, fallback: number): number {
   const raw = env[key];
   if (raw === undefined || raw === '') return fallback;
   const v = Number(raw);
-  if (Number.isNaN(v)) throw new Error(`环境变量 ${key} 不是有效数字: ${raw}`);
+  // 一律 Number.isFinite：NaN/±Infinity/乱串全部拒绝启动（与 bool 严格校验一致）。
+  // 如 LOOP_INTERVAL_S=Infinity 会让 setTimeout 溢出退化成 1ms 忙循环打爆 RPC/API
+  if (!Number.isFinite(v)) throw new Error(`环境变量 ${key} 不是有效数字: ${raw}`);
   return v;
 }
 
@@ -87,6 +89,13 @@ export function loadConfig(env: NodeJS.ProcessEnv): Config {
   const rpcUrl = required(env, 'RPC_URL');
   const apiKey1inch = required(env, 'API_KEY_1INCH');
 
+  // LOOP_INTERVAL_S 必须 > 0：0/负数/空白串（Number('  ')=0）会让主循环退化成
+  // 1ms 忙循环打爆 RPC/API，一律拒绝启动
+  const loopIntervalS = num(env, 'LOOP_INTERVAL_S', DEFAULTS.loopIntervalS);
+  if (loopIntervalS <= 0) {
+    throw new Error(`环境变量 LOOP_INTERVAL_S 必须为正数: ${loopIntervalS}`);
+  }
+
   return {
     privateKey,
     rpcUrl,
@@ -104,7 +113,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): Config {
     emptyPositionThresholdUsd: num(env, 'EMPTY_POSITION_THRESHOLD_USD', DEFAULTS.emptyPositionThresholdUsd),
     priceDriftPct: num(env, 'PRICE_DRIFT_PCT', DEFAULTS.priceDriftPct),
     positionMinIntervalS: num(env, 'POSITION_MIN_INTERVAL_S', DEFAULTS.positionMinIntervalS),
-    loopIntervalS: num(env, 'LOOP_INTERVAL_S', DEFAULTS.loopIntervalS),
+    loopIntervalS,
     maxConsecutiveFailures: num(env, 'MAX_CONSECUTIVE_FAILURES', DEFAULTS.maxConsecutiveFailures),
     maxActionsPerLoop: num(env, 'MAX_ACTIONS_PER_LOOP', DEFAULTS.maxActionsPerLoop),
     dryRun: bool(env, 'DRY_RUN', DEFAULTS.dryRun),

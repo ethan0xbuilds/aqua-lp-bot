@@ -43,6 +43,22 @@ describe('loadConfig', () => {
     expect(() => loadConfig({ ...BASE_ENV, DRY_RUN: 'ture' })).toThrow(/DRY_RUN/);
   });
 
+  it('num 字段一律 Number.isFinite 校验：NaN/Infinity/乱串拒绝启动', () => {
+    expect(() => loadConfig({ ...BASE_ENV, CHAIN_ID: 'Infinity' })).toThrow(/CHAIN_ID/);
+    expect(() => loadConfig({ ...BASE_ENV, MIN_SIDE_VALUE_USD: 'NaN' })).toThrow(/MIN_SIDE_VALUE_USD/);
+    expect(() => loadConfig({ ...BASE_ENV, MAX_POSITIONS_PER_SIDE: 'abc' })).toThrow(/MAX_POSITIONS_PER_SIDE/);
+    expect(() => loadConfig({ ...BASE_ENV, STALE_DISTANCE_PCT: '-Infinity' })).toThrow(/STALE_DISTANCE_PCT/);
+  });
+
+  it('LOOP_INTERVAL_S 必须 > 0：0/负数/空白串/Infinity 一律拒绝启动', () => {
+    expect(() => loadConfig({ ...BASE_ENV, LOOP_INTERVAL_S: '0' })).toThrow(/LOOP_INTERVAL_S/);
+    expect(() => loadConfig({ ...BASE_ENV, LOOP_INTERVAL_S: '-5' })).toThrow(/LOOP_INTERVAL_S/);
+    expect(() => loadConfig({ ...BASE_ENV, LOOP_INTERVAL_S: '   ' })).toThrow(/LOOP_INTERVAL_S/); // Number('  ')=0
+    expect(() => loadConfig({ ...BASE_ENV, LOOP_INTERVAL_S: 'Infinity' })).toThrow(/LOOP_INTERVAL_S/);
+    // 合法值照常通过
+    expect(loadConfig({ ...BASE_ENV, LOOP_INTERVAL_S: '30' }).loopIntervalS).toBe(30);
+  });
+
   it('宽度档位按阈值降序排列', () => {
     const cfg = loadConfig(BASE_ENV);
     expect(cfg.widthTiersUsd).toEqual([
