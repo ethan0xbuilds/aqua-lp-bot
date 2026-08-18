@@ -49,7 +49,12 @@ export class Executor {
       data: tx.data,
       value: tx.value,
     });
-    await this.publicClient.waitForTransactionReceipt({ hash });
+    // 回执 status 必须为 success：viem 的 waitForTransactionReceipt 对 revert 不抛错（仅超时/未找到/替换报错），
+    // 不检查会把 revert 当成功——ship 会记下幻影仓位（资金锁定）、dock 会误删仓位
+    const receipt = await this.publicClient.waitForTransactionReceipt({ hash });
+    if (receipt.status !== 'success') {
+      throw new Error(`交易回执非成功（status=${receipt.status}）: ${hash}`);
+    }
     return hash;
   }
 

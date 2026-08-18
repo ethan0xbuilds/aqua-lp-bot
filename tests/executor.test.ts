@@ -63,23 +63,53 @@ describe('Executor', () => {
   });
 
   it('网络错误自动重试，2 次后仍失败则抛出', async () => {
-    const { exec, sendTransaction } = makeMocks();
+    vi.useFakeTimers(); // 消除重试真实 sleep 的抖动风险（vitest 5s 默认超时误杀过）
+    const { exec, buildShip, sendTransaction } = makeMocks();
     sendTransaction
       .mockRejectedValueOnce(new Error('network'))
       .mockRejectedValueOnce(new Error('network'))
       .mockRejectedValueOnce(new Error('network'));
-    await expect(exec.ship(makeNewPos())).rejects.toThrow(/network/);
+    const p = exec.ship(makeNewPos());
+    const assertion = expect(p).rejects.toThrow(/network/); // 先挂处理器，避免假时钟推进期间的 unhandled rejection
+    await vi.runAllTimersAsync();
+    await assertion;
     expect(sendTransaction).toHaveBeenCalledTimes(3); // 1 次 + 2 重试
+    expect(buildShip).toHaveBeenCalledTimes(1); // 重试绝不重建 ship（随机 salt 幂等防线）
+    vi.useRealTimers();
   });
 
   it('重试后成功（第 2 次成功）', async () => {
-    const { exec, sendTransaction } = makeMocks();
+    vi.useFakeTimers();
+    const { exec, buildShip, sendTransaction } = makeMocks();
     sendTransaction.mockRejectedValueOnce(new Error('network'));
-    await exec.ship(makeNewPos());
+    const p = exec.ship(makeNewPos());
+    await vi.runAllTimersAsync();
+    await p;
     expect(sendTransaction).toHaveBeenCalledTimes(2);
+    expect(buildShip).toHaveBeenCalledTimes(1); // 重试绝不重建 ship（随机 salt 幂等防线）
+    vi.useRealTimers();
+  });
+
+  it('回执 status=reverted 时 ship/dock 均拒绝（revert 不算成功，防幻影仓位）', async () => {
+    vi.useFakeTimers();
+    const { exec, waitForTransactionReceipt } = makeMocks();
+    waitForTransactionReceipt.mockResolvedValue({ status: 'reverted' });
+    const shipP = exec.ship(makeNewPos());
+    const handledShip = shipP.catch((e) => e); // 先挂处理器，避免假时钟推进期间的 unhandled rejection
+    await vi.runAllTimersAsync();
+    const shipErr = await handledShip;
+    expect(String(shipErr)).toMatch(/reverted/);
+    expect(String(shipErr)).toContain('0x' + 'aa'.repeat(32)); // 错误信息含 tx hash
+    const dockP = exec.dock(makePos().strategyHash, makePos().tokenAddress);
+    const handledDock = dockP.catch((e) => e);
+    await vi.runAllTimersAsync();
+    const dockErr = await handledDock;
+    expect(String(dockErr)).toMatch(/reverted/);
+    vi.useRealTimers();
   });
 
   it('dockAll 逐个平仓，单个失败不影响其余（best-effort）', async () => {
+    vi.useFakeTimers(); // 消除重试真实 sleep 的抖动风险
     const { exec, buildDock, sendTransaction } = makeMocks();
     let calls = 0;
     sendTransaction.mockImplementation(async () => {
@@ -88,8 +118,11 @@ describe('Executor', () => {
       throw new Error('revert'); // 第 2 个仓位全部重试失败
     });
     const positions = [makePos(), makePos({ strategyHash: '0x' + 'cd'.repeat(32) as `0x${string}` })];
-    await exec.dockAll(positions); // 不抛错
+    const p = exec.dockAll(positions); // 不抛错
+    await vi.runAllTimersAsync();
+    await p;
     expect(buildDock).toHaveBeenCalledTimes(2);
     expect(sendTransaction).toHaveBeenCalledTimes(4); // 1 成功 + 3 次失败重试
+    vi.useRealTimers();
   });
 });
