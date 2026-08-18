@@ -8,15 +8,17 @@
  *   npm run smoke -- dock-all                          # 平掉本地表全部仓位（广播前人工确认，不依赖价格源）
  *
  * 注意：ship 只广播交易并返回 strategyHash，不写入本地仓位表；dock 从
- * data/positions.json 反查仓位对应的代币（表外 hash 一律拒绝）。因此
- * 平掉冒烟仓位前需先在 data/positions.json 手动登记该仓位（字段见
- * src/types.ts 的 Position），详见 README「冒烟测试」。
+ * data/positions.json 反查仓位对应的代币（表外 hash 一律拒绝），dock
+ * 成功后自动把该行从表删除（防死行残留）。因此平掉冒烟仓位前需先在
+ * data/positions.json 手动登记该仓位（字段见 src/types.ts 的 Position），
+ * 详见 README「冒烟测试」。
  */
 import 'dotenv/config';
 import { createInterface } from 'node:readline/promises';
 import { createPublicClient, createWalletClient, http } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { createAquaClient } from '../src/aqua-client.js';
+import { assertChainId } from '../src/chain-check.js';
 import { loadConfig } from '../src/config.js';
 import { Executor } from '../src/executor.js';
 import { Logger } from '../src/logger.js';
@@ -36,6 +38,8 @@ async function main(): Promise<void> {
   const account = privateKeyToAccount(cfg.privateKey);
   // chain: undefined 与 src/main.ts 一致（运行时 viem 走 client.chain 兜底，见 executor.ts send() 注释）
   const publicClient = createPublicClient({ chain: undefined, transport: http(cfg.rpcUrl) });
+  // 启动守卫：RPC 实际链 ID 必须与配置一致（Aqua 注册表地址 12 链通用，连错链不易察觉）
+  await assertChainId(publicClient, cfg.chainId);
   const wallet = createWalletClient({ account, chain: undefined, transport: http(cfg.rpcUrl) });
   const aqua = await createAquaClient(cfg);
   const executor = new Executor(aqua, wallet, publicClient, logger, cfg);
@@ -78,15 +82,20 @@ async function main(): Promise<void> {
     if (rest.indexOf('--strategy-hash') === -1) usage();
     const hash = rest[rest.indexOf('--strategy-hash') + 1] as `0x${string}`;
     if (!hash) usage();
-    const found = new PositionsStore('data/positions.json').load().find((p) => p.strategyHash === hash);
+    const store = new PositionsStore('data/positions.json');
+    const found = store.load().find((p) => p.strategyHash === hash);
     if (!found) {
       logger.error(`本地仓位表找不到 ${hash}，拒绝 dock`);
       process.exit(1);
     }
     const tx = await executor.dock(found.strategyHash, found.tokenAddress);
     logger.info(`✅ dock 完成，tx=${tx}`);
+    // dock 成功后从本地表清除该行：残留死行会让主循环熔断时反复 dock 它（重启即死循环）
+    store.save(store.load().filter((p) => p.strategyHash !== found.strategyHash));
+    logger.info('已从本地仓位表删除该行');
   } else if (cmd === 'dock-all') {
-    const positions = new PositionsStore('data/positions.json').load();
+    const store = new PositionsStore('data/positions.json');
+    const positions = store.load();
     // 真钱安全：一条命令平掉表内全部仓位，.env 若误指实盘钱包即全平实盘——
     // 广播前必须人工确认；非 y 输入直接取消（不广播、不改表）
     const rl = createInterface({ input: process.stdin, output: process.stdout });
@@ -96,8 +105,10 @@ async function main(): Promise<void> {
       logger.info('已取消 dock-all（未广播任何交易）');
       process.exit(0);
     }
-    await executor.dockAll(positions);
-    logger.info('✅ dock-all 完成');
+    const docked = await executor.dockAll(positions);
+    logger.info(`✅ dock-all 完成（成功 ${docked.length}/${positions.length}）`);
+    // 只删确认 dock 成功的行：失败行保留在表，便于下次继续处理（不误删未平仓位）
+    store.save(store.load().filter((p) => !docked.includes(p.strategyHash)));
   } else {
     usage();
   }
