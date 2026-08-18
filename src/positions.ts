@@ -15,8 +15,10 @@ export class PositionsStore {
       const parsed = JSON.parse(raw);
       if (!Array.isArray(parsed)) return [];
       return parsed as Position[];
-    } catch {
-      return []; // 文件不存在或损坏 → 从空表开始（链上对账会补正）
+    } catch (err) {
+      // 白名单表损坏必须留痕（真钱安全）：记录原因后从空表开始，链上对账会补正
+      console.warn('仓位表读取失败，从空表开始：', err);
+      return [];
     }
   }
 
