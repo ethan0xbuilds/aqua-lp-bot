@@ -75,7 +75,11 @@ function required(env: NodeJS.ProcessEnv, key: string): string {
 function bool(env: NodeJS.ProcessEnv, key: string, fallback: boolean): boolean {
   const raw = env[key];
   if (raw === undefined || raw === '') return fallback;
-  return raw === 'true' || raw === '1';
+  if (raw === 'true' || raw === '1') return true;
+  if (raw === 'false' || raw === '0') return false;
+  // 安全开关（DRY_RUN）绝不静默：拼写错误/大小写错误一律拒绝启动，
+  // 避免「想干跑却实盘」的无声风险
+  throw new Error(`环境变量 ${key} 不是有效布尔值: ${raw}（应为 true/false 或 1/0）`);
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv): Config {

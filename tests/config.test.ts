@@ -38,6 +38,11 @@ describe('loadConfig', () => {
     expect(cfg.dryRun).toBe(true);
   });
 
+  it('非法布尔值拒绝启动（安全开关不静默）', () => {
+    expect(() => loadConfig({ ...BASE_ENV, DRY_RUN: 'TRUE' })).toThrow(/DRY_RUN/);
+    expect(() => loadConfig({ ...BASE_ENV, DRY_RUN: 'ture' })).toThrow(/DRY_RUN/);
+  });
+
   it('宽度档位按阈值降序排列', () => {
     const cfg = loadConfig(BASE_ENV);
     expect(cfg.widthTiersUsd).toEqual([

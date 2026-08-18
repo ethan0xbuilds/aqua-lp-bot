@@ -289,6 +289,11 @@ describe('loadConfig', () => {
     expect(cfg.dryRun).toBe(true);
   });
 
+  it('非法布尔值拒绝启动（安全开关不静默）', () => {
+    expect(() => loadConfig({ ...BASE_ENV, DRY_RUN: 'TRUE' })).toThrow(/DRY_RUN/);
+    expect(() => loadConfig({ ...BASE_ENV, DRY_RUN: 'ture' })).toThrow(/DRY_RUN/);
+  });
+
   it('宽度档位按阈值降序排列', () => {
     const cfg = loadConfig(BASE_ENV);
     expect(cfg.widthTiersUsd).toEqual([
@@ -384,7 +389,10 @@ function required(env: NodeJS.ProcessEnv, key: string): string {
 function bool(env: NodeJS.ProcessEnv, key: string, fallback: boolean): boolean {
   const raw = env[key];
   if (raw === undefined || raw === '') return fallback;
-  return raw === 'true' || raw === '1';
+  if (raw === 'true' || raw === '1') return true;
+  if (raw === 'false' || raw === '0') return false;
+  // 安全开关（DRY_RUN）绝不静默：拼写错误/大小写错误一律拒绝启动
+  throw new Error(`环境变量 ${key} 不是有效布尔值: ${raw}（应为 true/false 或 1/0）`);
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv): Config {
