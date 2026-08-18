@@ -1034,7 +1034,7 @@ describe('decide 二仓（滚动）', () => {
 
   it('间隔 ≥240s 且价格上穿区间 0.05% → 开二仓（重 1INCH 侧）', () => {
     const state = side({ positions: [pos({ openedAtMs: NOW - 300_000 })] });
-    const drifted = P * 1.0004 * (1 + 0.0005); // 高于区间上限 0.05%
+    const drifted = P * 1.0004 * (1 + 0.0006); // 高于区间上限 0.05% 以上（严格大于）
     const d = decide(cfg, drifted, state, empty, NOW);
     expect(d.ships).toHaveLength(1);
     expect(d.ships[0].lower).toBe(drifted);
@@ -1043,7 +1043,7 @@ describe('decide 二仓（滚动）', () => {
   it('重 USDT 侧：价格下穿区间 0.05% → 开二仓', () => {
     const usdtPos = pos({ side: 'usdt', tokenAddress: cfg.tokenUsdt, lower: P * (1 - 0.0004), upper: P });
     const state = side({ positions: [usdtPos], tokenBalance: 20000n * 10n ** 6n, balanceUsd: 6000 });
-    const dropped = P * (1 - 0.0004) * (1 - 0.0005);
+    const dropped = P * (1 - 0.0004) * (1 - 0.0006); // 低于区间下限 0.05% 以上（严格小于）
     const d = decide(cfg, dropped, empty, state, NOW);
     expect(d.ships).toHaveLength(1);
     expect(d.ships[0].side).toBe('usdt');
@@ -1478,13 +1478,16 @@ describe('Executor', () => {
 
   it('dockAll 逐个平仓，单个失败不影响其余（best-effort）', async () => {
     const { exec, buildDock, sendTransaction } = makeMocks();
-    sendTransaction
-      .mockResolvedValueOnce('0x' + 'aa'.repeat(32)) // 第 1 个成功
-      .mockRejectedValueOnce(new Error('revert')); // 第 2 个失败
+    let calls = 0;
+    sendTransaction.mockImplementation(async () => {
+      calls += 1;
+      if (calls === 1) return '0x' + 'aa'.repeat(32); // 第 1 个仓位成功
+      throw new Error('revert'); // 第 2 个仓位全部重试失败
+    });
     const positions = [makePos(), makePos({ strategyHash: '0x' + 'cd'.repeat(32) })];
-    await exec.dockAll(positions);
+    await exec.dockAll(positions); // 不抛错
     expect(buildDock).toHaveBeenCalledTimes(2);
-    expect(sendTransaction).toHaveBeenCalledTimes(2);
+    expect(sendTransaction).toHaveBeenCalledTimes(4); // 1 成功 + 3 次失败重试
   });
 });
 ```
@@ -1658,7 +1661,7 @@ function fakePosition(over: Partial<Position> = {}): Position {
 /** 哨兵：首轮迭代结束后抛出让循环退出 */
 class StopAfterOne extends Error {}
 
-function makeDeps(over: Partial<LoopDeps> = {}): LoopDeps & { iterations: number } {
+function makeDeps(over: Partial<LoopDeps> = {}, throwAfterIteration = 1): LoopDeps & { iterations: number } {
   let iterations = 0;
   const store = new PositionsStore(join(mkdtempSync(join(tmpdir(), 'loop-')), 'positions.json'));
   const deps: LoopDeps = {
@@ -1679,7 +1682,7 @@ function makeDeps(over: Partial<LoopDeps> = {}): LoopDeps & { iterations: number
     } as never,
     aqua: { getRemaining: vi.fn().mockResolvedValue(20000n * 10n ** 18n) } as never,
     sleep: vi.fn(async () => {
-      if (++iterations >= 1) throw new StopAfterOne();
+      if (++iterations >= throwAfterIteration) throw new StopAfterOne();
     }),
     ...over,
   };
@@ -1707,7 +1710,7 @@ describe('runLoop', () => {
   });
 
   it('连续失败达到阈值 → dockAll 并退出', async () => {
-    const deps = makeDeps();
+    const deps = makeDeps({}, 3); // 允许跑 3 次失败迭代
     (deps.priceSource.getPrice as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('api down'));
     const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => undefined as never);
     await expect(runLoop(deps)).rejects.toBeInstanceOf(StopAfterOne);
@@ -1951,13 +1954,12 @@ git push
 import 'dotenv/config';
 import { createPublicClient, createWalletClient, http } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
-import { createAquaClient } from './aqua-client.js';
-import { loadConfig } from './config.js';
-import { Executor } from './executor.js';
-import { Logger } from './logger.js';
-import { PositionsStore } from './positions.js';
-import { SpotPriceApi } from './price/spot-price-api.js';
-import { fetchBalances } from './inventory.js';
+import { createAquaClient } from '../src/aqua-client.js';
+import { loadConfig } from '../src/config.js';
+import { Executor } from '../src/executor.js';
+import { Logger } from '../src/logger.js';
+import { PositionsStore } from '../src/positions.js';
+import { SpotPriceApi } from '../src/price/spot-price-api.js';
 
 function usage(): never {
   console.error('用法: npm run smoke -- ship --side inch|usdt --amount <U> | dock --strategy-hash 0x.. | dock-all');
@@ -1998,9 +2000,13 @@ async function main(): Promise<void> {
   } else if (cmd === 'dock') {
     const hash = rest[rest.indexOf('--strategy-hash') + 1] as `0x${string}`;
     if (!hash) usage();
-    const side: 'inch' | 'usdt' = hash.toLowerCase().includes('dry') ? 'inch' : 'inch'; // 占位：见下方注意
-    const tokenAddress = side === 'inch' ? cfg.tokenInch : cfg.tokenUsdt;
-    const tx = await executor.dock(hash, tokenAddress);
+    // dock 需要知道仓位对应的代币：从本地仓位表反查
+    const found = new PositionsStore('data/positions.json').load().find((p) => p.strategyHash === hash);
+    if (!found) {
+      logger.error(`本地仓位表找不到 ${hash}，拒绝 dock`);
+      process.exit(1);
+    }
+    const tx = await executor.dock(found.strategyHash, found.tokenAddress);
     logger.info(`✅ dock 完成，tx=${tx}`);
   } else if (cmd === 'dock-all') {
     const positions = new PositionsStore('data/positions.json').load();
@@ -2016,8 +2022,6 @@ main().catch((e) => {
   process.exit(1);
 });
 ```
-
-注意：`dock` 子命令需要知道仓位对应的代币（dock 需要 tokens 参数）。实现时先从 `data/positions.json` 反查该 strategyHash 对应的 tokenAddress；查不到才报错退出（删除上面代码中的占位行，替换为反查逻辑）。
 
 - [ ] **Step 2: 写 README.md**
 
